@@ -249,11 +249,14 @@ class Manager:
             if flow['state'] == 'done':
                 goal['verifiedOutcomes'] = goal.get('verifiedOutcomes', 0) + 1
             # Detailed results are fetched on demand rather than every HUD refresh.
+            dispatch = flow.get('crosswalk')
+            if dispatch and 'replyText' in dispatch:
+                dispatch = {key: val for key, val in dispatch.items() if key != 'replyText'}
             views.append({'taskId': row['id'], 'objective': flow['packet']['objective'], 'capability': flow['packet']['capability'],
                           'goal': goal['id'], 'state': flow['state'], 'revision': row['revision'], 'owner': row['owner'],
                           'score': score, 'factors': factors, 'corrections': flow['corrections'], 'updatedAt': flow['updatedAt'],
                           'blocker': flow.get('blocker'), 'nextSafeAction': flow['nextSafeAction'],
-                          'relay': flow.get('relay'), 'crosswalk': flow.get('crosswalk'),
+                          'relay': flow.get('relay'), 'crosswalk': dispatch,
                           'crosswalkReviewer': flow['packet'].get('crosswalkReviewer')})
         views.sort(key=lambda row: (row['state'] not in ACTIVE, -row['score'], -row['updatedAt']))
         roster = [{'id': 'muse-' + name, 'provider': 'Muse', 'account': account, 'role': role,
@@ -464,6 +467,8 @@ class Manager:
                     flow['nextSafeAction'] = ('The assigned Crosswalk review is queued for delivery.'
                                               if flow['packet'].get('autoCrosswalkReview') else
                                               'Read or copy the verified result. Any external action needs separate authority.')
+                    if flow['packet'].get('autoCrosswalkReview'):
+                        self.crosswalk.queue_automatic(db, flow)
                 elif flow['corrections'] < REVISION_LIMIT:
                     flow['corrections'] += 1
                     flow['state'] = 'working'
@@ -477,16 +482,7 @@ class Manager:
             value = self.update(db, row, flow)
         self.log.emit('manager_receipt', 'manager', runId=value['run']['runId'], command=phase, outcome=value['state'])
         if value['state'] == 'done' and value['packet'].get('autoCrosswalkReview'):
-            try:
-                self.crosswalk.dispatch({'taskId': row['id'], 'revision': value['revision'],
-                                         'role': value['packet']['crosswalkReviewer']}, automatic=True)
-            except (Conflict, Denied, OSError) as error:
-                self.log.emit('manager_auto_review', 'manager', runId=value['run']['runId'], outcome=type(error).__name__)
-                with self.store.tx() as db:
-                    current_row, current = self.row(db, row['id'])
-                    if not current.get('crosswalk'):
-                        current['nextSafeAction'] = 'Automatic review was held. Verify the assigned Crosswalk connection before sending.'
-                        self.update(db, current_row, current)
+            self.crosswalk.deliver_automatic(row['id'])
             with self.store.lock:
                 value = self.view(*self.row(self.store.db, row['id']))
         return {'taskId': row['id'], 'state': value['state'], 'revision': value['revision']}
@@ -507,6 +503,9 @@ class Manager:
                 self.monitor.connections.record('hermes', 'Unavailable', 'The installed adapter could not verify inference. Inspect the Hermes probe and account entitlement.')
             return {'accepted': True}
         if action == 'claim':
+            if pending := self.crosswalk.next_automatic():
+                self.crosswalk.deliver_automatic(pending)
+                return {'task': None, 'deliveryProcessed': True}
             return self.claim(actor)
         if action == 'result':
             return self.submit(actor, body)

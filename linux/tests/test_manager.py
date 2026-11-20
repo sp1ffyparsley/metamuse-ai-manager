@@ -216,6 +216,52 @@ class ManagerTest(unittest.TestCase):
         self.assertIn(SOURCE, posts[0]['body'])
         self.assertNotIn('Do not share this private fact', posts[0]['body'])
 
+    def test_automatic_review_recovers_after_result_commit(self):
+        owner, reviewer = '1111-2222-3333-4444', '2222-3333-4444-5555'
+        crosswalk = {'board': 'fixture-board', 'number': owner, 'workers': {'main': reviewer}}
+        self.manager.crosswalk.settings.update(crosswalk)
+        self.monitor.connections.record('crosswalk-main', 'Tested write', 'Fixture only', providerAccountId=reviewer,
+                                        board='fixture-board', sender=owner)
+        task = self.create('recover-automatic', crosswalkReviewer='main', autoCrosswalkReview=True)
+        self.submit(self.claim(), approach='Read official release', checks=[CRITERION])
+        self.submit(self.claim(), summary='Reviewed research', citations=[SOURCE])
+        with patch.object(self.manager.crosswalk, 'deliver_automatic', side_effect=SystemExit), self.assertRaises(SystemExit):
+            self.submit(self.claim(), verdict='accept', feedback='Exact citation', criteriaMet=[CRITERION])
+        restarted = Monitor({'state': self.temp.name, 'workspaces': {}, 'principals': {},
+                             'manager': {'crosswalk': crosswalk}})
+        self.addCleanup(restarted.store.db.close)
+        posts = []
+
+        def call(tool, args):
+            if tool == 'crosswalks':
+                return [{'slug': 'fixture-board', 'private': True}]
+            if tool == 'account' and args['action'] == 'numbers':
+                return {'you': owner}
+            if tool == 'account' and args['action'] == 'rules':
+                return {'key': {'scope': 'full', 'enters': 'to/fixture-board'}}
+            if tool == 'post':
+                posts.append(args)
+                return {'id': 'recovered-post'}
+            if tool == 'open':
+                return {'replies': [{'id': 'recovered-reply', 'reply_to': 'recovered-post', 'via_number': reviewer,
+                                     'brief': posts[0]['brief'].replace('METAMUSE REVIEW ', 'METAMUSE RESULT '),
+                                     'body': 'First line\nSecond line' + 'é' * 2000}]}
+            raise AssertionError((tool, args))
+
+        manager = restarted.manager
+        manager.crosswalk.call = call
+        self.assertEqual(task['taskId'], manager.crosswalk.next_automatic())
+        self.assertTrue(manager.worker(WORKER, {'action': 'claim'})['deliveryProcessed'])
+        self.assertEqual((0, True), manager_worker.step({}, {'deliveryProcessed': True}))
+        self.assertIsNone(manager.crosswalk.next_automatic())
+        self.assertEqual(1, len(posts))
+        receipt = manager.crosswalk.reconcile_dispatch(task['taskId'])
+        self.assertEqual(('reply-verified', 'recovered-reply'), (receipt['state'], receipt['replyId']))
+        self.assertTrue(receipt['replyText'].startswith('First line\nSecond line'))
+        self.assertLessEqual(len(receipt['replyText'].encode('utf-8')), 3500)
+        self.assertTrue(receipt['replyTruncated'])
+        self.assertNotIn('replyText', manager.dashboard()['board'][0]['crosswalk'])
+
     def test_public_research_targets_and_text(self):
         self.assertEqual(SOURCE, source_url('https://github.com/NousResearch/hermes-agent/releases/latest'))
         reddit = 'https://www.reddit.com/r/Blender/comments/ab12/title'

@@ -352,6 +352,11 @@ internal sealed partial class ManagerWindow
         if (value.TryGetProperty("crosswalk", out var record) && record.ValueKind == JsonValueKind.Object) {
             root.Children.Add(Text($"Sent to {ReviewerName(Str(record, "role", ""))}"));
             root.Children.Add(Text(DispatchStatus(record)));
+            if (Str(record, "replyText", "") is { Length: > 0 } reply) {
+                Field(root, "Crosswalk review", reply, 6).IsReadOnly = true;
+                if (record.TryGetProperty("replyTruncated", out var truncated) && truncated.ValueKind == JsonValueKind.True)
+                    root.Children.Add(Text("Open the private board to read the rest of the reply."));
+            }
             if (Str(record, "state") != "reply-verified")
                 root.Children.Add(Action("Check Crosswalk reply", () => _ = RunManager(async client => {
                     var result = await client.ManagerAction(new { action = "crosswalk-dispatch-reconcile", taskId }, lifetime.Token);
@@ -397,7 +402,9 @@ internal sealed partial class ManagerWindow
     };
 
     private static string DispatchStatus(JsonElement record) => Str(record, "state") switch {
-        "reply-verified" => "Crosswalk reply matched the intended role and original post. Review the findings on the private board.",
+        "reply-verified" => record.TryGetProperty("replyAvailable", out var available) && available.ValueKind == JsonValueKind.True
+            ? "Crosswalk review verified against the intended role and original post."
+            : "Crosswalk reply verified. Open the private board to read the findings.",
         "posted" => "Crosswalk review request posted. Awaiting a verified reply.",
         _ => "Crosswalk post outcome is unknown. Check for a reply before taking any further action."
     };

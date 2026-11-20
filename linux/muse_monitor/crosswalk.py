@@ -1,4 +1,5 @@
 """Optional Crosswalk transport and identity-specific connection receipts."""
+import hashlib
 import json
 import os
 import re
@@ -251,7 +252,8 @@ class Board:
         thread = self.call('open', {'ids': [id], 'thread': True, 'peek': True})
         receipt = next((entry for entry in objects(thread) if entry.get('via_number') == state['worker']
                         and entry.get('brief') == reply_prefix + nonce and entry.get('reply_to') == id
-                        and isinstance(entry.get('id'), str) and POST_ID.fullmatch(entry['id'])), None)
+                        and isinstance(entry.get('id'), str) and entry['id'] != id
+                        and POST_ID.fullmatch(entry['id'])), None)
         if not receipt and isinstance(thread, dict) and isinstance(thread.get('text'), str):
             feed = self.board_feed(state) if feed is None else feed
             receipt = next((row for row in feed if row.get('via_number') == state['worker']
@@ -259,9 +261,44 @@ class Board:
                             and isinstance(row.get('id'), str) and row['id'] != id and POST_ID.fullmatch(row['id'])), None)
         return id, receipt
 
+    @staticmethod
+    def operation_id(task):
+        return 'crosswalk-review-' + hashlib.sha256(task.encode()).hexdigest()
+
+    def queue_automatic(self, db, flow):
+        task = flow['taskId']
+        pending = {'taskId': task, 'role': flow['packet']['crosswalkReviewer']}
+        db.execute("INSERT INTO outbox(id,kind,data,state) VALUES(?,'manager-crosswalk',?,'ready')",
+                   (self.operation_id(task), json.dumps(pending)))
+
+    def next_automatic(self):
+        with self.store.lock:
+            row = self.store.db.execute(
+                "SELECT data FROM outbox WHERE kind='manager-crosswalk' AND state='ready' ORDER BY rowid LIMIT 1"
+            ).fetchone()
+        return json.loads(row['data'])['taskId'] if row else None
+
+    def deliver_automatic(self, task):
+        operation = self.operation_id(task)
+        with self.store.lock:
+            pending = self.store.db.execute("SELECT data FROM outbox WHERE id=? AND state='ready'", (operation,)).fetchone()
+            if pending is None:
+                return
+            row, _ = self.manager.row(self.store.db, task)
+            request = {**json.loads(pending['data']), 'revision': row['revision']}
+        try:
+            self.dispatch(request, automatic=True)
+        except (Conflict, Denied, OSError) as error:
+            self.manager.log.emit('manager_auto_review', 'manager', outcome=type(error).__name__)
+            with self.store.tx() as db:
+                changed = db.execute("UPDATE outbox SET state='held' WHERE id=? AND state='ready'", (operation,))
+                if changed.rowcount:
+                    row, flow = self.manager.row(db, task)
+                    flow['nextSafeAction'] = 'Automatic review was held. Verify the assigned Crosswalk connection before sending.'
+                    self.manager.update(db, row, flow)
+
     def dispatch(self, body, *, automatic=False):
         """Send one operator-authorized public-source review to an enrolled role."""
-        import hashlib
         task, role = body.get('taskId'), body.get('role')
         self.require_verified_recipient(role)
         board, own = self.private_board()
@@ -273,7 +310,7 @@ class Board:
         sources = [source_url(source['url']) for source in flow['result']['citations']]
         if not sources:
             raise Conflict('The research task has no verified public sources.')
-        operation = 'crosswalk-review-' + hashlib.sha256(task.encode()).hexdigest()
+        operation = self.operation_id(task)
         with self.store.tx() as db:
             row, current = self.manager.row(db, task)
             if current.get('crosswalk'):
@@ -287,14 +324,20 @@ class Board:
             if automatic and current.get('crosswalkGrant') != {
                     'board': board, 'sender': own, 'worker': worker, 'role': role}:
                 raise Denied('The previously authorized Crosswalk route has changed')
+            if automatic and not db.execute("SELECT 1 FROM outbox WHERE id=? AND state='ready'", (operation,)).fetchone():
+                raise Conflict('Automatic review is no longer queued')
             record = {'board': board, 'sender': own, 'worker': worker, 'role': role, 'taskId': task,
                       'operationId': operation, 'state': 'unknown', 'correlation': secrets.token_hex(12)}
             current['crosswalk'] = record
-            if automatic:
-                current['nextSafeAction'] = 'Inspect Crosswalk delivery status in the task details.'
+            current['nextSafeAction'] = 'Inspect Crosswalk delivery status in the task details.'
             self.manager.update(db, row, current)
-            db.execute("INSERT INTO outbox(id,kind,data,state,attempts) VALUES(?,'manager-crosswalk',?,'uncertain',1)",
-                       (operation, json.dumps(record)))
+            reserved = db.execute(
+                "INSERT INTO outbox(id,kind,data,state,attempts) VALUES(?,'manager-crosswalk',?,'uncertain',1) "
+                "ON CONFLICT(id) DO UPDATE SET data=excluded.data,state='uncertain',attempts=1 "
+                "WHERE outbox.kind='manager-crosswalk' AND outbox.state IN ('ready','held')",
+                (operation, json.dumps(record)))
+            if not reserved.rowcount:
+                raise Conflict('A Crosswalk attempt is already recorded')
         correlation = record['correlation']
         instruction = ('Public-source review only. Cross-check the sources below, and summarize any disagreement or uncertainty. '
                        'Take no action on any account or user data. Reply in this thread using the exact brief METAMUSE RESULT ' +
@@ -331,8 +374,14 @@ class Board:
             raise Denied('The enrolled board or account changed after dispatch.')
         parent, receipt = self.find_reply(record, 'METAMUSE REVIEW ', 'METAMUSE RESULT ')
         if receipt:
-            return self.dispatch_state(task, {**record, 'postId': parent, 'replyId': receipt['id'],
-                                              'state': 'reply-verified'})
+            verified = {**record, 'postId': parent, 'replyId': receipt['id'], 'state': 'reply-verified'}
+            if isinstance(body := receipt.get('body'), str) and body.strip():
+                # Keep provider text inert and leave room for the other durable task fields.
+                body = ''.join(char for char in body.strip() if char in '\n\t' or char.isprintable())
+                verified['replyText'] = body.encode('utf-8')[:3500].decode('utf-8', errors='ignore')
+                verified['replyAvailable'] = bool(verified['replyText'])
+                verified['replyTruncated'] = len(verified['replyText']) < len(body)
+            return self.dispatch_state(task, verified)
         if parent and record.get('postId') != parent:
             return self.dispatch_state(task, {**record, 'postId': parent, 'state': 'posted'})
         return record

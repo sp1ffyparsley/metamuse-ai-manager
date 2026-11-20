@@ -271,6 +271,9 @@ def run(settings, probe=False, force_refresh=False, drain=False):
 
 
 def step(settings, value):
+    if value.get('deliveryProcessed') is True:
+        note('delivery-processed')
+        return 0, True
     task = value.get('task')
     if not task:
         note('idle', value.get('reason', 'No work'))

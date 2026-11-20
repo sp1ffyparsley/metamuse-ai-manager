@@ -499,6 +499,8 @@ def main():
         manager.manager_worker_only=True
         manager_path.chmod(0o660)
         threading.Thread(target=manager.serve_forever,daemon=True).start()
+        if monitor.manager.crosswalk.next_automatic():
+            monitor.manager.wake()
     monitor.start()
     try:server.serve_forever()
     finally:
