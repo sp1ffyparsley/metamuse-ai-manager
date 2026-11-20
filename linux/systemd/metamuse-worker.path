@@ -1,0 +1,8 @@
+[Unit]
+Description=Watch for work in the existing MetaMuse controller journal
+
+[Path]
+PathChanged=/var/lib/muse-monitor-manager/ready
+
+[Install]
+WantedBy=default.target

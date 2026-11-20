@@ -1,0 +1,38 @@
+{
+  "manifest_version": 3,
+  "name": "Muse Workspace Tools",
+  "version": "0.2.1",
+  "description": "Workspace-aware tabs, protected grouping, captures and link collections.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA7OMLg11y7wQUVE7UtjLwSzgTSHkB4f1j3QN11kJeTOqpkJT6xBJBIlzgsS3q9il3hCI2N9uBZyPhPIWSgxpvGqsU8hUIugpWFJ0wX6sw5oVtsWdw601fbUOFfnbKyXis4otkyLw0VJNqJPot/vvLzVQfD75obd/n0LEuLGCYu2uJvLWqIUmNz59VWpoS2f5YTHoWAgv7k7tZSMHRZ3wTdbdbn4xDatXNE+yeo+dEzKU+05xG3y6bf0KGGPbG/aeMfQQNE9V4R87IQbiDy5elg8ETZnxmK4uWbUvt5VdRqWmPMImRjEeNoaluz+iqtCqKHGzzw1BMQla22CzChWCG8QIDAQAB",
+  "permissions": [
+    "tabs",
+    "tabGroups",
+    "storage",
+    "nativeMessaging"
+  ],
+  "host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "background.mjs",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Muse Workspace Tools"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "exclude_matches": ["https://accounts.google.com/*"],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}

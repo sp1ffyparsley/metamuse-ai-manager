@@ -1,0 +1,9 @@
+[Unit]
+Description=MetaMuse scoped Hermes work on a controller readiness event
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/muse-monitor/muse_monitor/manager_worker.py --drain
+UMask=0077
+NoNewPrivileges=yes
+TimeoutStartSec=20min
