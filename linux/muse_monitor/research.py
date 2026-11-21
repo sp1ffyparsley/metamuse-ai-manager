@@ -4,6 +4,7 @@ import json
 import re
 import threading
 import time
+from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
@@ -17,6 +18,22 @@ HOSTS = {'api.github.com', 'docs.github.com', 'developer.mozilla.org', 'docs.ble
          'www.reddit.com', 'github.com'}
 AGENT = 'MetaMuseResearch/1.0'
 MAX_BODY = 512 * 1024
+RATE_BACKOFF = 900
+
+
+def retry_deadline(headers, now, github):
+    after = (headers.get('Retry-After') or '').strip()
+    if after:
+        if after.isascii() and after.isdecimal() and len(after) <= 12:
+            return now + max(1, int(after))
+        try:
+            return max(now + 1, parsedate_to_datetime(after).timestamp())
+        except (ValueError, OverflowError, TypeError, OSError):
+            pass
+    reset = headers.get('X-RateLimit-Reset', '') if github else ''
+    if reset.isascii() and reset.isdecimal() and len(reset) <= 12 and int(reset) > now:
+        return int(reset)
+    return now + RATE_BACKOFF
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -123,25 +140,39 @@ class Research:
     def get(self, supplied, min_age=900):
         url = source_url(supplied)
         identity = 'manager:' + hashlib.sha256(url.encode()).hexdigest()
+        host = urlsplit(url).netloc
+        limit_id = 'manager-source-backoff:' + host
         now = time.time()
         with self.lock:
             with self.store.lock:
                 row = self.store.db.execute('SELECT state,last_attempt FROM source WHERE id=?', (identity,)).fetchone()
+                limit = self.store.db.execute('SELECT data FROM setting WHERE id=?', (limit_id,)).fetchone()
             cached = json.loads(row['state']) if row and row['state'] else {}
-            if row and now - row['last_attempt'] < min_age:
+            if row and 'retryAt' not in cached and now - row['last_attempt'] < min_age:
                 return {**cached, 'change': 'cached'}
+            if limit and (retry_at := json.loads(limit['data'])) > now:
+                return self.rate_limited(url, now, retry_at)
             result = self.fetch(url, cached, now)
             with self.store.tx() as db:
+                if 'retryAt' in result:
+                    db.execute('INSERT INTO setting(id,data) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data',
+                               (limit_id, json.dumps(result['retryAt'])))
                 db.execute('''INSERT INTO source(id,last_attempt,last_success,state) VALUES(?,?,?,?)
                               ON CONFLICT(id) DO UPDATE SET last_attempt=excluded.last_attempt,
                               last_success=COALESCE(excluded.last_success,source.last_success),state=excluded.state''',
                            (identity, now, now if result['availability'] == 'available' else None, json.dumps(result)))
             return result
 
+    @staticmethod
+    def rate_limited(url, now, retry_at):
+        return {'url': url, 'availability': 'unavailable', 'change': 'unavailable', 'observedAt': now,
+                'code': 'rate-limited', 'retryAt': retry_at,
+                'reason': 'The public source host is rate limiting requests.'}
+
     def fetch(self, url, cached, now):
         failed = {'url': url, 'availability': 'unavailable', 'change': 'unavailable', 'observedAt': now}
         if not self.allowed(url, now):
-            return {**failed, 'reason': 'Robots policy does not allow this fetch or could not be verified.'}
+            return {**failed, 'code': 'robots-policy', 'reason': 'Robots policy does not allow this fetch or could not be verified.'}
         headers = {}
         if cached.get('etag'):
             headers['If-None-Match'] = cached['etag']
@@ -151,7 +182,7 @@ class Research:
             with self.open(url, headers) as response:
                 body = response.read(MAX_BODY + 1)
                 if len(body) > MAX_BODY:
-                    return {**failed, 'reason': 'Response exceeds the public research size limit.'}
+                    return {**failed, 'code': 'response-too-large', 'reason': 'Response exceeds the public research size limit.'}
                 content = extract(body, response.headers.get_content_type())
                 source_hash = hashlib.sha256(content.encode()).hexdigest()
                 return {'url': url, 'availability': 'available', 'observedAt': now,
@@ -161,6 +192,11 @@ class Research:
         except HTTPError as error:
             if error.code == 304 and cached.get('sha256'):
                 return {**cached, 'availability': 'available', 'observedAt': now, 'change': 'unchanged'}
-            return {**failed, 'reason': f'Public source returned HTTP {error.code}.'}
+            github = urlsplit(url).netloc == 'api.github.com'
+            headers = error.headers or {}
+            if error.code == 429 or (github and error.code == 403 and
+                                     (headers.get('X-RateLimit-Remaining') == '0' or headers.get('Retry-After'))):
+                return self.rate_limited(url, now, retry_deadline(headers, now, github))
+            return {**failed, 'code': 'http-error', 'reason': f'Public source returned HTTP {error.code}.'}
         except (TimeoutError, ValueError, OSError, Conflict):
-            return {**failed, 'reason': 'Public source could not be retrieved or parsed.'}
+            return {**failed, 'code': 'unreadable', 'reason': 'Public source could not be retrieved or parsed.'}

@@ -304,6 +304,21 @@ internal sealed partial class ManagerWindow
             if (value.TryGetProperty(name, out var part)) {
                 resultsView.Children.Add(Text(name switch { "sourceEvidence" => "Collected evidence", "history" => "Activity history",
                     "plan" => "Plan", "review" => "Review", _ => "Result" }, true));
+                if (name == "sourceEvidence" && part.ValueKind == JsonValueKind.Array) {
+                    foreach (var source in part.EnumerateArray()) {
+                        if (source.ValueKind != JsonValueKind.Object) continue;
+                        resultsView.Children.Add(Text(Str(source, "url", "Public source")));
+                        var available = Str(source, "availability") == "available";
+                        var detail = available ? Str(source, "excerpt", "Readable source") :
+                            Str(source, "reason", "Could not read this source.");
+                        if (!available && source.TryGetProperty("retryAt", out var retry) &&
+                            retry.ValueKind == JsonValueKind.Number && retry.TryGetDouble(out var seconds) &&
+                            seconds is > 0 and < 253402300799)
+                            detail += $" Retry after {DateTimeOffset.FromUnixTimeSeconds((long)Math.Ceiling(seconds)):yyyy-MM-dd HH:mm} UTC.";
+                        resultsView.Children.Add(Text(detail));
+                    }
+                    continue;
+                }
                 if (name == "result" && part.TryGetProperty("draft", out var draft))
                     Field(resultsView, "Reviewed draft", draft.GetString() ?? "", 6).IsReadOnly = true;
                 if (name == "result" && value.GetProperty("packet").TryGetProperty("draft", out var original))

@@ -2,12 +2,14 @@ import json
 import tempfile
 import time
 import unittest
+from email.message import Message
+from urllib.error import HTTPError
 from pathlib import Path
 from unittest.mock import patch
 
 from muse_monitor import manager_worker
 from muse_monitor.manager import ACTOR
-from muse_monitor.research import extract, source_url
+from muse_monitor.research import Research, extract, source_url
 from muse_monitor.server import Monitor
 from muse_monitor.store import Conflict, Denied
 
@@ -251,10 +253,14 @@ class ManagerTest(unittest.TestCase):
         manager = restarted.manager
         manager.crosswalk.call = call
         self.assertEqual(task['taskId'], manager.crosswalk.next_automatic())
-        self.assertTrue(manager.worker(WORKER, {'action': 'claim'})['deliveryProcessed'])
+        with patch.object(manager.crosswalk, 'dispatch_state', side_effect=SystemExit), self.assertRaises(SystemExit):
+            manager.worker(WORKER, {'action': 'claim'})
         self.assertEqual((0, True), manager_worker.step({}, {'deliveryProcessed': True}))
         self.assertIsNone(manager.crosswalk.next_automatic())
         self.assertEqual(1, len(posts))
+        saved = manager.operator(HUMAN, {'action': 'read', 'taskId': task['taskId']})
+        self.assertNotIn('postId', saved['crosswalk'])
+        # The provider stub only supports opening the known ID. Feed/search need not be indexed yet.
         receipt = manager.crosswalk.reconcile_dispatch(task['taskId'])
         self.assertEqual(('reply-verified', 'recovered-reply'), (receipt['state'], receipt['replyId']))
         self.assertTrue(receipt['replyText'].startswith('First line\nSecond line'))
@@ -272,6 +278,29 @@ class ManagerTest(unittest.TestCase):
                 source_url(url)
         value = extract(json.dumps({'title': 'Release', 'body': 'A concrete public feature suitable for a test result.'}).encode(), 'application/json')
         self.assertIn('concrete public feature', value)
+
+    def test_research_rate_limit_survives_restart_and_blocks_other_urls_until_retry(self):
+        headers = Message()
+        headers['Retry-After'] = '60'
+        read = Research(self.monitor.store)
+        other = SOURCE.replace('/releases/latest', '/issues/12')
+        with patch('muse_monitor.research.time.time', return_value=1000), patch.object(
+                read, 'open', side_effect=HTTPError(SOURCE, 429, 'rate limited', headers, None)) as request:
+            self.assertEqual(1060, read.get(SOURCE)['retryAt'])
+            self.assertEqual(1, request.call_count)
+        restarted = Monitor({'state': self.temp.name, 'workspaces': {}, 'principals': {}})
+        self.addCleanup(restarted.store.db.close)
+        read = restarted.manager.research
+        with patch('muse_monitor.research.time.time', return_value=1030), patch.object(read, 'open') as request:
+            self.assertEqual('rate-limited', read.get(other)['code'])
+            request.assert_not_called()
+        headers = Message()
+        headers['X-RateLimit-Remaining'] = '0'
+        headers['X-RateLimit-Reset'] = '1200'
+        with patch('muse_monitor.research.time.time', return_value=1061), patch.object(
+                read, 'open', side_effect=HTTPError(SOURCE, 403, 'rate limited', headers, None)) as request:
+            self.assertEqual(1200, read.get(SOURCE)['retryAt'])
+            self.assertEqual(1, request.call_count)
 
     def test_relay_recovers_lost_write_without_reposting(self):
         task = self.create('fixture-relay')

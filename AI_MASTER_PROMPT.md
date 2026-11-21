@@ -10,6 +10,7 @@ Review the exact commit requested by the operator. Start with [README](README.md
 - Crosswalk is a private transport between verified role identities. A public research task may preauthorize one automatic request to an exact selected recipient. The controller checks the board and identities and only posts its verified public citations. The approved result and pending handoff are saved together. The worker can recover a queued handoff after controller restart. A reserved send with an uncertain result must be reconciled. Task details can render bounded reply text when the authenticated provider response supplies it.
 - Google APIs serve reads and the optional Drive Research Relay. A saved Drive packet is distinct from a verified scheduled consumer receipt. Canonical production writes require guarded cutover.
 - The Windows app can look up approved excerpts from the user's existing local AgentVault. The vault and its content are external to this repo.
+- Supplied-link research shows per-source evidence or a failure reason and persists provider backoff across restart. Crosswalk reconciliation reuses a confirmed post ID from the outbox if the task view was interrupted before saving it.
 
 ## Maintainership
 

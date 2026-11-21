@@ -364,7 +364,11 @@ class Board:
     def reconcile_dispatch(self, task):
         with self.store.lock:
             _, flow = self.manager.row(self.store.db, task)
-        record = flow.get('crosswalk')
+            record = flow.get('crosswalk')
+            saved = self.store.db.execute(
+                "SELECT data FROM outbox WHERE id=? AND kind='manager-crosswalk' AND state='posted'",
+                (record['operationId'],)
+            ).fetchone() if record and not record.get('postId') else None
         if not record:
             raise Conflict('This task has no Crosswalk dispatch.')
         if record['state'] == 'reply-verified':
@@ -372,6 +376,13 @@ class Board:
         board, own = self.private_board()
         if (board, own, self.recipient(record['role'], own)) != (record['board'], record['sender'], record['worker']):
             raise Denied('The enrolled board or account changed after dispatch.')
+        if saved:
+            posted = json.loads(saved['data'])
+            post_id = posted.get('postId')
+            if (isinstance(post_id, str) and POST_ID.fullmatch(post_id) and
+                    all(posted.get(key) == record[key] for key in
+                        ('board', 'sender', 'worker', 'role', 'taskId', 'operationId', 'correlation'))):
+                record = self.dispatch_state(task, {**record, 'postId': post_id, 'state': 'posted'})
         parent, receipt = self.find_reply(record, 'METAMUSE REVIEW ', 'METAMUSE RESULT ')
         if receipt:
             verified = {**record, 'postId': parent, 'replyId': receipt['id'], 'state': 'reply-verified'}

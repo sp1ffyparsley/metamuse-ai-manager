@@ -10,6 +10,7 @@
 
 - The implementation includes direct Work Board access, named Crosswalk reviewer assignment, and optional automatic delivery of verified public citations. Fixture coverage checks exact-recipient enforcement, account-change holds, and post receipt state.
 - A new fixture interrupts the process after the accepted result commits, restarts from the same journal, verifies one send and checks bounded text readback from an authenticated reply fixture. Installed recovery and live reply-body retrieval still need verification.
+- The follow-up adds fixture coverage for recovering a locally recorded post receipt without provider search, and for persisted host-wide backoff and GitHub rate-limit reset. Its paired runtime deployment and visual checks remain open.
 - The public snapshot ran 126 Ubuntu tests (125 passed, one optional native D-Bus test skipped). The Windows build passed with no warnings, all 36 Windows client checks passed, and all six extension tests passed.
 - Deployment tools and live test entry points are included as source. The public copy has no production service, account access, or original acceptance artifacts.
 

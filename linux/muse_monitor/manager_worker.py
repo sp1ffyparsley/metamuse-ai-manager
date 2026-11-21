@@ -27,7 +27,7 @@ POLICY = (
 )
 SCHEMAS = {
     'plan': 'Return {"approach":"brief plan","checks":["concrete acceptance checks"]}. Identify the useful evidence and avoid repeated or out-of-scope work.',
-    'research': 'Return {"summary":"brief with findings, why they matter and uncertainty","citations":["exact URL from evidence"]}. Cite only the supplied URLs.',
+    'research': 'Return {"summary":"findings, why they matter, unavailable sources and material disagreements","citations":["exact URL from available evidence"]}. Distinguish what each source supports. If an unreadable source or unresolved disagreement limits the conclusion, say how. Never cite an unavailable source as evidence.',
     'email-review': 'Return {"summary":"what materially improved","draft":"revised email body","issues":["specific defects"]}. Check recipient, facts, promised timing, attachment references, tone and next action. Use a concise natural voice. Never imply a message was sent or a file was attached unless confirmed.',
     'review': 'Return {"verdict":"accept or revise","feedback":"specific evidence-backed judgment and correction when needed","criteriaMet":["verbatim criteria met"]}. Evaluate independently. Reject invented facts, unsupported conclusions or empty evidence.'
 }
